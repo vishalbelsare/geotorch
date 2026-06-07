@@ -1,7 +1,9 @@
-from unittest import TestCase
+from unittest import TestCase, mock
+
+import torch
 
 from geotorch.lowrank import LowRank
-from geotorch.fixedrank import FixedRank
+from geotorch.fixedrank import FixedRank, inv_softplus_epsilon, softplus_epsilon
 
 
 class TestLowRank(TestCase):
@@ -22,3 +24,44 @@ class TestLowRank(TestCase):
         # On the wrong string
         with self.assertRaises(ValueError):
             FixedRank(size=(5, 3), rank=2, f="wrong")
+
+    def test_fixed_rank_rejects_rank_deficient_matrix(self):
+        manifold = FixedRank(size=(3, 3), rank=3)
+        matrix = torch.diag(torch.tensor([3.0, 2.0, 0.0]))
+        self.assertFalse(manifold.in_manifold(matrix))
+
+    def test_inverse_softplus_is_stable(self):
+        x = torch.tensor([1e-4, 1.0, 100.0], dtype=torch.float64)
+        inverse = inv_softplus_epsilon(x)
+        self.assertTrue(torch.isfinite(inverse).all())
+        self.assertTrue(torch.allclose(softplus_epsilon(inverse), x))
+
+    def test_full_rank_sample_skips_svd(self):
+        for size in [(3, 3), (5, 3), (3, 5), (2, 5, 3)]:
+            manifold = LowRank(size=size, rank=min(size[-2:])).double()
+
+            def init_(X):
+                return X.copy_(
+                    torch.arange(X.numel(), dtype=X.dtype, device=X.device).view_as(X)
+                )
+
+            canonical_size = size[:-2] + (max(size[-2:]), min(size[-2:]))
+            expected = torch.empty(canonical_size, dtype=torch.float64)
+            expected = torch.arange(expected.numel(), dtype=expected.dtype).view_as(
+                expected
+            )
+            if size[-2] < size[-1]:
+                expected = expected.mT
+
+            with mock.patch("torch.linalg.svd", side_effect=AssertionError):
+                sample = manifold.sample(init_)
+            self.assertTrue(torch.equal(sample, expected))
+
+    def test_fixed_rank_sample_clamps_singular_values(self):
+        manifold = FixedRank(size=(3, 3), rank=2).double()
+        _, singular_values, _ = manifold.sample(
+            init_=lambda X: X.zero_(), eps=0.25, factorized=True
+        )
+        self.assertTrue(
+            torch.equal(singular_values, torch.full_like(singular_values, 0.25))
+        )

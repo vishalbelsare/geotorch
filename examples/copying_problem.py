@@ -20,6 +20,7 @@ dynamics account for using SGD as the optimizer calling `update_basis()` after e
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.utils import parametrize
 
 import geotorch
 
@@ -47,11 +48,12 @@ class modrelu(nn.Module):
     def __init__(self, features):
         super(modrelu, self).__init__()
         self.features = features
-        self.b = nn.Parameter(torch.Tensor(self.features))
+        self.b = nn.Parameter(torch.empty(self.features))
         self.reset_parameters()
 
     def reset_parameters(self):
-        self.b.data.uniform_(-0.01, 0.01)
+        with torch.no_grad():
+            self.b.uniform_(-0.01, 0.01)
 
     def forward(self, inputs):
         norm = torch.abs(inputs)
@@ -77,7 +79,7 @@ class ExpRNNCell(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.kaiming_normal_(self.input_kernel.weight.data, nonlinearity="relu")
+        nn.init.kaiming_normal_(self.input_kernel.weight, nonlinearity="relu")
         # The manifold class is under `layer.parametrizations.tensor_name[0]`
         M = self.recurrent_kernel.parametrizations.weight[0]
         # Every manifold has a convenience sample method, but you can use your own initializer
@@ -103,20 +105,20 @@ class Model(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.kaiming_normal_(self.lin.weight.data, nonlinearity="relu")
-        nn.init.constant_(self.lin.bias.data, 0)
+        nn.init.kaiming_normal_(self.lin.weight, nonlinearity="relu")
+        nn.init.constant_(self.lin.bias, 0)
 
     def forward(self, inputs):
         out_rnn = self.rnn.default_hidden(inputs[:, 0, ...])
         outputs = []
-        with geotorch.parametrize.cached():
+        with parametrize.cached():
             for input in torch.unbind(inputs, dim=1):
                 out_rnn = self.rnn(input, out_rnn)
                 outputs.append(self.lin(out_rnn))
         return torch.stack(outputs, dim=1)
 
     def loss(self, logits, y):
-        return self.loss_func(logits.view(-1, 9), y.view(-1))
+        return self.loss_func(logits.flatten(0, 1), y.flatten())
 
     def accuracy(self, logits, y):
         return torch.eq(torch.argmax(logits, dim=2), y).float().mean()
@@ -136,15 +138,12 @@ def copy_data(batch_size):
     seq = torch.randint(
         1, alphabet_size + 1, (batch_size, S), dtype=torch.long, device=device
     )
-    zeros1 = torch.zeros((batch_size, L), dtype=torch.long, device=device)
-    zeros2 = torch.zeros((batch_size, S - 1), dtype=torch.long, device=device)
-    zeros3 = torch.zeros((batch_size, S + L), dtype=torch.long, device=device)
-    marker = torch.full(
-        (batch_size, 1), alphabet_size + 1, dtype=torch.long, device=device
-    )
 
-    x = torch.cat([seq, zeros1, marker, zeros2], dim=1)
-    y = torch.cat([zeros3, seq], dim=1)
+    x = torch.zeros((batch_size, L + 2 * S), dtype=torch.long, device=device)
+    y = torch.zeros_like(x)
+    x[:, :S] = seq
+    x[:, S + L] = alphabet_size + 1
+    y[:, S + L :] = seq
 
     return x, y
 
@@ -153,10 +152,9 @@ def main():
     model = Model(alphabet_size, hidden_size).to(device)
 
     p_orth = model.rnn.recurrent_kernel
-    orth_params = p_orth.parameters()
-    non_orth_params = (
-        p for p in model.parameters() if p not in set(p_orth.parameters())
-    )
+    orth_params = list(p_orth.parameters())
+    orth_params_set = set(orth_params)
+    non_orth_params = [p for p in model.parameters() if p not in orth_params_set]
 
     if RGD:
         # Implement Stochstic Riemannian Gradient Descent via SGD

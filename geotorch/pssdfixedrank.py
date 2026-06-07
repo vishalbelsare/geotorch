@@ -80,7 +80,7 @@ class PSSDFixedRank(SymF):
 
             >>> layer = nn.Linear(20, 20)
             >>> M = PSSD(layer.weight.size())
-            >>> geotorch.register_parametrization(layer, "weight", M)
+            >>> torch.nn.utils.parametrize.register_parametrization(layer, "weight", M)
             >>> layer.weight = M.sample()
 
         Args:
@@ -95,5 +95,5 @@ class PSSDFixedRank(SymF):
         L, Q = super().sample(factorized=True, init_=init_)
         with torch.no_grad():
             # L >= 0, as given by torch.linalg.eigvalsh()
-            L[L < eps] = eps
+            L.clamp_min_(eps)
         return (Q * L.unsqueeze(-2)) @ Q.transpose(-2, -1)

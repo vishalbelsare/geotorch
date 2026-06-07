@@ -1,12 +1,13 @@
 # Tests for the Sphere
-from unittest import TestCase
+from unittest import TestCase, mock
 import itertools
 
 import torch
 import torch.nn as nn
+from torch.nn.utils import parametrize
 
-import geotorch.parametrize as P
 from geotorch.symmetric import Symmetric, SymF
+from geotorch.pssd import PSSD
 
 
 class TestSymmetric(TestCase):
@@ -19,14 +20,16 @@ class TestSymmetric(TestCase):
 
         for n, lower in itertools.product(sizes, [True, False]):
             layer = nn.Linear(n, n)
-            P.register_parametrization(layer, "weight", Symmetric(lower=lower))
+            parametrize.register_parametrization(
+                layer, "weight", Symmetric(lower=lower)
+            )
 
             input_ = torch.rand(5, n)
             optim = torch.optim.SGD(layer.parameters(), lr=1.0)
 
             # Assert that is stays in Sym(n) after some optimiser steps
             for _ in range(2):
-                with P.cached():
+                with parametrize.cached():
                     self.assertTrue(Symmetric.in_manifold(layer.weight))
                     loss = layer(input_).sum()
                 optim.zero_grad()
@@ -62,3 +65,17 @@ class TestSymmetric(TestCase):
 
     def test_repr(self):
         print(Symmetric())
+
+    def test_full_rank_sample_skips_eigendecomposition(self):
+        manifold = PSSD(size=(2, 4, 4)).double()
+
+        def init_(X):
+            return X.copy_(
+                torch.arange(X.numel(), dtype=X.dtype, device=X.device).view_as(X)
+            )
+
+        X = torch.arange(32, dtype=torch.float64).view(2, 4, 4)
+        expected = X @ X.mT
+        with mock.patch("torch.linalg.eigh", side_effect=AssertionError):
+            sample = manifold.sample(init_)
+        self.assertTrue(torch.equal(sample, expected))
